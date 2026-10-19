@@ -1,0 +1,6 @@
+.tools/
+node_modules/
+build/
+dist/
+*.user
+*.log

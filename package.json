@@ -1,0 +1,14 @@
+{
+  "name": "windows-terminal-handoff-fix",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Global Windows Terminal handoff fixes for runtime GUI consoles and elevated applications.",
+  "license": "MIT",
+  "scripts": {
+    "format:docs": "prettier --write \"**/*.{md,json}\" windows-terminal-handoff-fix.code-workspace",
+    "check:docs": "prettier --check \"**/*.{md,json}\" windows-terminal-handoff-fix.code-workspace"
+  },
+  "devDependencies": {
+    "prettier": "3.9.10"
+  }
+}

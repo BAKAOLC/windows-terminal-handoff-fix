@@ -1,0 +1,18 @@
+{
+    "folders": [{ "path": "." }],
+    "settings": {
+        "editor.formatOnSave": true,
+        "files.exclude": {
+            "**/.tools": true,
+            "**/node_modules": true,
+        },
+        "[powershell]": { "editor.defaultFormatter": "ms-vscode.powershell" },
+        "[cpp]": { "editor.defaultFormatter": "ms-vscode.cpptools" },
+        "[markdown]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+        "[json]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+        "C_Cpp.clang_format_style": "file",
+    },
+    "extensions": {
+        "recommendations": ["ms-vscode.powershell", "ms-vscode.cpptools", "esbenp.prettier-vscode"],
+    },
+}
