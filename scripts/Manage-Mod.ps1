@@ -58,7 +58,7 @@ function Remove-ApplicationException {
 
 function Undo-ModInstallation {
     param([Parameter(Mandatory)]$Deployment)
-    if ($Deployment.Library -ne 'console-default-terminal_1.0.0.dll') { throw 'Unknown mod library identity.' }
+    if ($Deployment.Library -notmatch '^console-default-terminal_\d+\.\d+\.\d+\.dll$') { throw 'Unknown mod library identity.' }
     foreach ($file in $Deployment.Files) {
         $allowed = @(
             (Join-Path $storage ('Engine\Mods\32\' + $Deployment.Library)),
@@ -106,7 +106,7 @@ if ($Action -eq 'Install') {
     }
     $BuildPath = [IO.Path]::GetFullPath($BuildPath)
     $manifest = Get-Content -LiteralPath (Join-Path $BuildPath 'manifest.json') -Raw | ConvertFrom-Json -AsHashtable
-    if ($manifest.Schema -ne 1 -or $manifest.Project -ne 'windows-terminal-handoff-fix' -or $manifest.ModId -ne $modId -or $manifest.Version -ne '1.0.0') {
+    if ($manifest.Schema -ne 1 -or $manifest.Project -ne 'windows-terminal-handoff-fix' -or $manifest.ModId -ne $modId -or $manifest.Version -ne '1.0.1') {
         throw 'Unsupported mod build manifest.'
     }
     $files = @()
@@ -115,7 +115,7 @@ if ($Action -eq 'Install') {
         if ($binary.File -ne ('console-default-terminal-' + $pair[0] + '.dll')) { throw 'Unexpected mod binary name.' }
         $source = Join-Path $BuildPath $binary.File
         if ((Get-FileHash -LiteralPath $source).Hash -ne $binary.SHA256) { throw 'Mod binary checksum mismatch.' }
-        $destination = Join-Path $storage ('Engine\Mods\' + $pair[1] + '\console-default-terminal_1.0.0.dll')
+        $destination = Join-Path $storage ('Engine\Mods\' + $pair[1] + '\console-default-terminal_1.0.1.dll')
         if (Test-Path -LiteralPath $destination) { throw 'A destination mod library already exists.' }
         $files += @{ Source = $source; Destination = $destination; SHA256 = $binary.SHA256; Created = $false; MayBePartial = $false }
     }
@@ -149,7 +149,7 @@ if ($Action -eq 'Install') {
     }
     $state = @{
         Schema = 1; Project = 'windows-terminal-handoff-fix'; UserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-        Phase = 'Installing'; KeyCreated = $false; Library = 'console-default-terminal_1.0.0.dll'; Files = $files; Exceptions = $exceptions
+        Phase = 'Installing'; KeyCreated = $false; Library = 'console-default-terminal_1.0.1.dll'; Files = $files; Exceptions = $exceptions
     }
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     Write-JsonFile $stateFile $state
@@ -159,7 +159,7 @@ if ($Action -eq 'Install') {
         $state.KeyCreated = $true
         Write-JsonFile $stateFile $state
         foreach ($pair in @{
-                LibraryFileName = $state.Library; Include = '*'; Architecture = 'x86|x86-64'; Version = '1.0.0'
+                LibraryFileName = $state.Library; Include = '*'; Architecture = 'x86|x86-64'; Version = '1.0.1'
                 Exclude = 'windhawk.exe|windhawk-x64-helper.exe|conhost.exe|OpenConsole.exe|WindowsTerminal.exe'
                 IncludeCustom = ''; ExcludeCustom = ''
             }.GetEnumerator()) { New-ItemProperty -LiteralPath $key -Name $pair.Key -Value $pair.Value -PropertyType String | Out-Null }

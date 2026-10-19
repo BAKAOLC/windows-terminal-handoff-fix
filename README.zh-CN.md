@@ -67,6 +67,16 @@ mod 钩住导出的 `AllocConsole` API，以及可用时的 `AllocConsoleWithOpt
 
 函数地址在运行时通过导出表解析，不依赖私有函数偏移、指令特征、系统 DLL 哈希或符号下载。`AllocConsoleWithOptions` 从 Windows 11 24H2 起提供，因此是可选入口；更早版本使用 `AllocConsole`。DLL 地址变化不需要更新偏移，但 ConDrv 协议发生不兼容变化时，解析器可能需要调整。
 
+### 控制台窗口可见性
+
+应用可能先分配控制台，再将它隐藏用于后台工作。在 ConPTY 下，`GetConsoleWindow()` 返回的是伪窗口，而不是可见的 Terminal 窗口。Terminal 原生的可见性转发会将相关操作转为最小化和还原，无法保留 `SW_HIDE` 的隐藏行为。
+
+对于通过 mod 分配的控制台，`ShowWindow`、`ShowWindowAsync` 和 `SetWindowPos` 的可见性标志会转发到所属的 Terminal 窗口，`IsWindowVisible` 则返回该窗口的可见性。目标通过伪窗口的所有者关系确定，不依赖窗口标题、前台焦点、程序名称或安装路径。隐藏期间控制台保持连接。
+
+应用立即发出隐藏请求时，Terminal 的最后一次启动显示操作可能尚未完成。进程内的事件监听会在这个初始化竞态中保留隐藏请求，只监听关联的 Terminal 进程，并在操作前重新核实窗口归属。mod 卸载时会释放事件钩子和工作线程；应用后续发出的显示请求会取消待处理的隐藏状态。
+
+如果同一 Terminal 窗口拥有多个伪控制台窗口，mod 会保留原生行为，避免隐藏无关会话。其他窗口、已有控制台及无法识别的终端宿主也保持原生行为。可见性转发并不模拟传统控制台的全部窗口管理 API。
+
 ### 提权 COM 激活
 
 接管过程还依赖 COM 激活。如果提权进程无法发现打包版 Terminal 的 COM 服务，激活可能返回 `REGDB_E_CLASSNOTREG`（`0x80040154`），使系统回退到传统宿主。[microsoft/terminal#10276](https://github.com/microsoft/terminal/issues/10276) 讨论了这一限制，是否受影响取决于 Windows 版本和安装方式。

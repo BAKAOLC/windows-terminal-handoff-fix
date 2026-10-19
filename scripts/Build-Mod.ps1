@@ -29,7 +29,7 @@ foreach ($item in @(@('x86', '32', 'i686-w64-mingw32'), @('x64', '64', 'x86_64-w
     if (-not (Test-Path -LiteralPath $library)) { throw "Windhawk import library missing: $library" }
     $arguments = @(
         '-std=c++23', '-O2', '-shared', '-DUNICODE', '-D_UNICODE', '-DWH_MOD',
-        '-DWH_MOD_ID=L"console-default-terminal"', '-DWH_MOD_VERSION=L"1.0.0"',
+        '-DWH_MOD_ID=L"console-default-terminal"', '-DWH_MOD_VERSION=L"1.0.1"',
         '-DWINVER=0x0A00', '-D_WIN32_WINNT=0x0A00', '-DNTDDI_VERSION=0x0A000008',
         '-D__USE_MINGW_ANSI_STDIO=0', '-target', $item[2],
         '-include', (Join-Path $WindhawkPath 'Compiler\include\windhawk_api.h'),
@@ -40,7 +40,7 @@ foreach ($item in @(@('x86', '32', 'i686-w64-mingw32'), @('x64', '64', 'x86_64-w
     $binaries[$item[0]] = @{ File = Split-Path $output -Leaf; SHA256 = (Get-FileHash -LiteralPath $output).Hash }
 }
 $manifest = @{
-    Schema = 1; Project = 'windows-terminal-handoff-fix'; ModId = 'console-default-terminal'; Version = '1.0.0'
+    Schema = 1; Project = 'windows-terminal-handoff-fix'; ModId = 'console-default-terminal'; Version = '1.0.1'
     SourceSHA256 = (Get-FileHash -LiteralPath $source).Hash
     Binaries = $binaries
     Compatibility = 'ConDrv server EA protocol; exported AllocConsole and NtCreateFile'

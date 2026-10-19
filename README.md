@@ -67,6 +67,16 @@ Before modifying a request, the parser validates the device path or parent devic
 
 Function addresses are resolved from exports at runtime. The mod does not depend on private function offsets, instruction signatures, system-DLL hashes, or downloaded symbols. `AllocConsoleWithOptions` is optional because it was introduced in Windows 11 24H2; earlier releases use `AllocConsole`. Changes to DLL addresses do not require offset updates, but an incompatible ConDrv protocol change may require changes to the parser.
 
+### Console window visibility
+
+Applications can allocate a console and then hide it for background use. Under ConPTY, `GetConsoleWindow()` returns a pseudo window rather than the visible Terminal window. Terminal's native handling translates visibility changes into minimize and restore requests, which does not preserve `SW_HIDE` behavior.
+
+For a console allocated through the mod, `ShowWindow`, `ShowWindowAsync`, and the visibility flags of `SetWindowPos` are forwarded to its Terminal window. `IsWindowVisible` reports that window's visibility. The target is resolved through the pseudo window's owner relationship; window titles, foreground focus, executable names, and installation paths are not used. The console remains attached while hidden.
+
+An immediate hide can precede Terminal's final startup show. A process-local event listener keeps the hide request in effect across that initialization race. It watches the associated Terminal process, rechecks the owner relationship before acting, and releases its event hook and worker thread when the mod is unloaded. A later application show request cancels the pending hide.
+
+If the Terminal window owns multiple pseudo console windows, the mod preserves native behavior to avoid hiding unrelated sessions. It also preserves native behavior for other windows, existing consoles, and unrecognized terminal hosts. The visibility bridge does not emulate all legacy console window-management APIs.
+
 ### Elevated COM activation
 
 Handoff also depends on COM activation. If an elevated process cannot discover the packaged Terminal's COM server, activation may fail with `REGDB_E_CLASSNOTREG` (`0x80040154`), causing a fallback to the legacy host. This limitation is discussed in [microsoft/terminal#10276](https://github.com/microsoft/terminal/issues/10276); its applicability depends on the Windows version and installation method.

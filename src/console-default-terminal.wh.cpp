@@ -2,7 +2,7 @@
 // @id              console-default-terminal
 // @name            Default Terminal Handoff Fix
 // @description     Fix default terminal handoff for consoles allocated by GUI applications.
-// @version         1.0.0
+// @version         1.0.1
 // @include         *
 // @exclude         windhawk.exe
 // @exclude         windhawk-x64-helper.exe
@@ -17,6 +17,7 @@
 #include <windows.h>
 #include <winternl.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstring>
 
@@ -154,6 +155,196 @@ AllocateFunction g_allocate;
 AllocateWithOptionsFunction g_allocateWithOptions;
 QueryObjectFunction g_queryObject;
 thread_local unsigned g_allocationDepth = 0;
+thread_local bool g_rewrittenAllocation = false;
+std::atomic<HWND> g_managedConsole = nullptr;
+decltype(&ShowWindow) g_showWindow;
+decltype(&ShowWindowAsync) g_showWindowAsync;
+decltype(&SetWindowPos) g_setWindowPos;
+decltype(&IsWindowVisible) g_isWindowVisible;
+std::atomic<HWND> g_hiddenConsole = nullptr;
+SRWLOCK g_visibilityLock = SRWLOCK_INIT;
+HANDLE g_visibilityThread = nullptr;
+HANDLE g_visibilityStop = nullptr;
+HANDLE g_visibilityChanged = nullptr;
+
+bool HasClass(HWND window, const WCHAR *expected)
+{
+    WCHAR name[128];
+    return GetClassNameW(window, name, ARRAYSIZE(name)) && !wcscmp(name, expected);
+}
+
+struct ConsoleWindowSearch
+{
+    HWND console;
+    HWND owner;
+    bool shared = false;
+};
+
+BOOL CALLBACK FindOtherConsole(HWND window, LPARAM parameter)
+{
+    auto &search = *reinterpret_cast<ConsoleWindowSearch *>(parameter);
+    if (window != search.console && GetWindow(window, GW_OWNER) == search.owner &&
+        HasClass(window, L"PseudoConsoleWindow"))
+    {
+        search.shared = true;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+// ConPTY's HWND is an owned pseudo window, not the terminal's UI. Its built-in
+// visibility callback translates SW_HIDE into a minimize request. Follow the
+// actual owner relationship instead of guessing by title, focus, or process.
+// A shared window must never be hidden on behalf of just one of its sessions.
+HWND TerminalWindow(HWND console, bool wait = false)
+{
+    if (!console || console != g_managedConsole.load() || console != GetConsoleWindow() ||
+        !HasClass(console, L"PseudoConsoleWindow"))
+        return nullptr;
+    const auto deadline = GetTickCount64() + (wait ? 2000 : 0);
+    do
+    {
+        HWND owner = GetWindow(console, GW_OWNER);
+        if (owner && HasClass(owner, L"CASCADIA_HOSTING_WINDOW_CLASS"))
+        {
+            ConsoleWindowSearch search{console, owner};
+            EnumWindows(FindOtherConsole, reinterpret_cast<LPARAM>(&search));
+            return search.shared ? nullptr : owner;
+        }
+        if (!wait || GetTickCount64() >= deadline)
+            break;
+        Sleep(1);
+    } while (console == GetConsoleWindow());
+    return nullptr;
+}
+
+void CALLBACK VisibilityEvent(HWINEVENTHOOK, DWORD, HWND window, LONG object, LONG child, DWORD,
+                              DWORD)
+{
+    if (object == OBJID_WINDOW && child == CHILDID_SELF &&
+        window == TerminalWindow(g_hiddenConsole.load()))
+        g_showWindowAsync(window, SW_HIDE);
+}
+
+DWORD WINAPI VisibilityThread(void *)
+{
+    HWINEVENTHOOK hook = nullptr;
+    HWND watched = nullptr;
+    HANDLE events[] = {g_visibilityStop, g_visibilityChanged};
+    for (;;)
+    {
+        const auto owner = TerminalWindow(g_hiddenConsole.load());
+        if (owner != watched)
+        {
+            if (hook)
+                UnhookWinEvent(hook);
+            hook = nullptr;
+            watched = owner;
+            if (owner)
+            {
+                DWORD process = 0;
+                GetWindowThreadProcessId(owner, &process);
+                hook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, nullptr,
+                                       VisibilityEvent, process, 0, WINEVENT_OUTOFCONTEXT);
+            }
+        }
+        // Register before checking visibility: the host can perform its initial
+        // ShowWindow after the client's hide call has already returned.
+        if (owner && owner == TerminalWindow(g_hiddenConsole.load()) && g_isWindowVisible(owner))
+            g_showWindowAsync(owner, SW_HIDE);
+        const auto result = MsgWaitForMultipleObjects(
+            ARRAYSIZE(events), events, FALSE, owner ? 1000 : (g_hiddenConsole ? 50 : INFINITE),
+            QS_ALLINPUT);
+        if (result == WAIT_OBJECT_0 || result == WAIT_FAILED)
+            break;
+        if (result == WAIT_OBJECT_0 + ARRAYSIZE(events))
+        {
+            MSG message;
+            while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
+            {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+    }
+    if (hook)
+        UnhookWinEvent(hook);
+    return 0;
+}
+
+void TrackVisibility(HWND console, bool hidden)
+{
+    if (!console || console != g_managedConsole.load() || console != GetConsoleWindow() ||
+        !HasClass(console, L"PseudoConsoleWindow"))
+        return;
+    AcquireSRWLockExclusive(&g_visibilityLock);
+    g_hiddenConsole = hidden ? console : nullptr;
+    if (hidden && !g_visibilityThread)
+    {
+        g_visibilityStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        g_visibilityChanged = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (g_visibilityStop && g_visibilityChanged)
+            g_visibilityThread = CreateThread(nullptr, 0, VisibilityThread, nullptr, 0, nullptr);
+        if (!g_visibilityThread)
+        {
+            if (g_visibilityStop)
+                CloseHandle(g_visibilityStop);
+            if (g_visibilityChanged)
+                CloseHandle(g_visibilityChanged);
+            g_visibilityStop = g_visibilityChanged = nullptr;
+        }
+    }
+    if (g_visibilityChanged)
+        SetEvent(g_visibilityChanged);
+    ReleaseSRWLockExclusive(&g_visibilityLock);
+}
+
+BOOL WINAPI ShowWindowHook(HWND window, int command)
+{
+    const auto error = GetLastError();
+    TrackVisibility(window, command == SW_HIDE);
+    const auto owner = TerminalWindow(window, true);
+    SetLastError(error);
+    return g_showWindow(owner ? owner : window, command);
+}
+
+BOOL WINAPI ShowWindowAsyncHook(HWND window, int command)
+{
+    const auto error = GetLastError();
+    TrackVisibility(window, command == SW_HIDE);
+    const auto owner = TerminalWindow(window, true);
+    SetLastError(error);
+    return g_showWindowAsync(owner ? owner : window, command);
+}
+
+BOOL WINAPI IsWindowVisibleHook(HWND window)
+{
+    const auto error = GetLastError();
+    const auto owner = TerminalWindow(window);
+    SetLastError(error);
+    return g_isWindowVisible(owner ? owner : window);
+}
+
+BOOL WINAPI SetWindowPosHook(HWND window, HWND after, int x, int y, int width, int height,
+                             UINT flags)
+{
+    if (!(flags & (SWP_HIDEWINDOW | SWP_SHOWWINDOW)))
+        return g_setWindowPos(window, after, x, y, width, height, flags);
+    const auto error = GetLastError();
+    TrackVisibility(window, (flags & SWP_HIDEWINDOW) != 0);
+    const auto owner = TerminalWindow(window, true);
+    SetLastError(error);
+    if (!owner)
+        return g_setWindowPos(window, after, x, y, width, height, flags);
+    // Geometry and z-order still belong to the caller's original HWND.
+    const auto result = g_setWindowPos(window, after, x, y, width, height,
+                                       flags & ~(SWP_HIDEWINDOW | SWP_SHOWWINDOW));
+    const auto resultError = GetLastError();
+    if (result)
+        g_showWindow(owner, flags & SWP_HIDEWINDOW ? SW_HIDE : SW_SHOWNOACTIVATE);
+    SetLastError(resultError);
+    return result;
+}
 
 class AllocationScope
 {
@@ -227,6 +418,8 @@ NTSTATUS NTAPI CreateFileHook(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIB
     const auto status =
         g_createFile(handle, access, attributes, ioStatus, allocationSize, fileFlags, sharing,
                      disposition, options, copy ? copy : ea, eaLength);
+    if (copy && status >= 0)
+        g_rewrittenAllocation = true;
     const DWORD resultError = GetLastError();
     if (copy)
         HeapFree(GetProcessHeap(), 0, copy);
@@ -236,16 +429,42 @@ NTSTATUS NTAPI CreateFileHook(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIB
 
 BOOL WINAPI AllocateHook()
 {
+    const bool outermost = !g_allocationDepth;
+    if (outermost)
+        g_rewrittenAllocation = false;
     AllocationScope scope;
-    return g_allocate();
+    const auto result = g_allocate();
+    if (outermost && result && g_rewrittenAllocation)
+    {
+        const auto error = GetLastError();
+        g_hiddenConsole = nullptr;
+        g_managedConsole = GetConsoleWindow();
+        if (g_visibilityChanged)
+            SetEvent(g_visibilityChanged);
+        SetLastError(error);
+    }
+    return result;
 }
 
 HRESULT WINAPI AllocateWithOptionsHook(const void *options, void *result)
 {
     // Visibility is checked in the outgoing message, after Windows has resolved
     // defaults and inherited settings. Attach requests have their own EA name.
+    const bool outermost = !g_allocationDepth;
+    if (outermost)
+        g_rewrittenAllocation = false;
     AllocationScope scope;
-    return g_allocateWithOptions(options, result);
+    const auto status = g_allocateWithOptions(options, result);
+    if (outermost && SUCCEEDED(status) && g_rewrittenAllocation)
+    {
+        const auto error = GetLastError();
+        g_hiddenConsole = nullptr;
+        g_managedConsole = GetConsoleWindow();
+        if (g_visibilityChanged)
+            SetEvent(g_visibilityChanged);
+        SetLastError(error);
+    }
+    return status;
 }
 
 bool IsInteractiveGuiProcess()
@@ -296,5 +515,40 @@ BOOL Wh_ModInit()
                                            reinterpret_cast<void *>(AllocateWithOptionsHook),
                                            reinterpret_cast<void **>(&g_allocateWithOptions)))
         return FALSE;
+    if (!Wh_SetFunctionHook(reinterpret_cast<void *>(ShowWindow),
+                            reinterpret_cast<void *>(ShowWindowHook),
+                            reinterpret_cast<void **>(&g_showWindow)) ||
+        !Wh_SetFunctionHook(reinterpret_cast<void *>(ShowWindowAsync),
+                            reinterpret_cast<void *>(ShowWindowAsyncHook),
+                            reinterpret_cast<void **>(&g_showWindowAsync)) ||
+        !Wh_SetFunctionHook(reinterpret_cast<void *>(IsWindowVisible),
+                            reinterpret_cast<void *>(IsWindowVisibleHook),
+                            reinterpret_cast<void **>(&g_isWindowVisible)) ||
+        !Wh_SetFunctionHook(reinterpret_cast<void *>(SetWindowPos),
+                            reinterpret_cast<void *>(SetWindowPosHook),
+                            reinterpret_cast<void **>(&g_setWindowPos)))
+        return FALSE;
     return TRUE;
+}
+
+void Wh_ModBeforeUninit()
+{
+    AcquireSRWLockExclusive(&g_visibilityLock);
+    g_hiddenConsole = nullptr;
+    if (g_visibilityStop)
+        SetEvent(g_visibilityStop);
+    if (g_visibilityThread)
+        WaitForSingleObject(g_visibilityThread, INFINITE);
+    ReleaseSRWLockExclusive(&g_visibilityLock);
+}
+
+void Wh_ModUninit()
+{
+    if (g_visibilityThread)
+        CloseHandle(g_visibilityThread);
+    if (g_visibilityStop)
+        CloseHandle(g_visibilityStop);
+    if (g_visibilityChanged)
+        CloseHandle(g_visibilityChanged);
+    g_visibilityThread = g_visibilityStop = g_visibilityChanged = nullptr;
 }

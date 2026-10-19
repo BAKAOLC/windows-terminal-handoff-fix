@@ -1,6 +1,6 @@
 {
   "name": "windows-terminal-handoff-fix",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Global Windows Terminal handoff fixes for runtime GUI consoles and elevated applications.",
   "license": "MIT",

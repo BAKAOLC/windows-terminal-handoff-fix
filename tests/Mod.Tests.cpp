@@ -263,6 +263,71 @@ bool SetImport(void **slot, void *value)
     return VirtualProtect(slot, sizeof(*slot), protection, &ignored) != FALSE;
 }
 
+bool WaitVisible(HWND window, bool visible)
+{
+    const auto deadline = GetTickCount64() + 4000;
+    while (!!IsWindowVisible(window) != visible && GetTickCount64() < deadline)
+        Sleep(10);
+    return !!IsWindowVisible(window) == visible;
+}
+
+void TestWindowVisibility()
+{
+    g_showWindow = ShowWindow;
+    g_showWindowAsync = ShowWindowAsync;
+    g_isWindowVisible = IsWindowVisible;
+    g_setWindowPos = SetWindowPos;
+    const auto console = GetConsoleWindow();
+    ShowWindowHook(console, SW_HIDE);
+    const auto owner = TerminalWindow(console, true);
+    Check(owner != nullptr, "resolves the allocated console's actual Terminal owner");
+    if (!owner)
+        return;
+    Sleep(1000);
+    Check(!IsWindowVisible(owner), "an immediate hide survives the host's initial show");
+    ShowWindow(owner, SW_SHOWNOACTIVATE);
+    Check(WaitVisible(owner, false), "a later host show does not override the pending hide");
+    Check(g_managedConsole == console, "tracks only a successfully rewritten allocation");
+    ShowWindowHook(console, SW_HIDE);
+    Check(WaitVisible(owner, false), "ShowWindow hides the terminal instead of minimizing it");
+    Check(!IsWindowVisibleHook(console), "visibility queries observe the hidden terminal");
+    ShowWindowHook(console, SW_SHOWNOACTIVATE);
+    Check(WaitVisible(owner, true), "ShowWindow restores the same terminal window");
+    Check(IsWindowVisibleHook(console), "visibility queries observe the restored terminal");
+    ShowWindowAsyncHook(console, SW_HIDE);
+    Check(WaitVisible(owner, false), "ShowWindowAsync hides the terminal");
+    ShowWindowAsyncHook(console, SW_SHOWNOACTIVATE);
+    Check(WaitVisible(owner, true), "ShowWindowAsync restores the terminal");
+    const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+    Check(SetWindowPosHook(console, nullptr, 0, 0, 0, 0, flags | SWP_HIDEWINDOW) &&
+              WaitVisible(owner, false),
+          "SetWindowPos hides the terminal");
+    Check(SetWindowPosHook(console, nullptr, 0, 0, 0, 0, flags | SWP_SHOWWINDOW) &&
+              WaitVisible(owner, true),
+          "SetWindowPos restores the terminal");
+    // A second owned pseudo HWND simulates another session in the same window.
+    // The bridge must leave the native path untouched in that case.
+    WNDCLASSW windowClass{};
+    windowClass.lpszClassName = L"PseudoConsoleWindow";
+    windowClass.lpfnWndProc = DefWindowProcW;
+    windowClass.hInstance = GetModuleHandleW(nullptr);
+    const auto atom = RegisterClassW(&windowClass);
+    const auto other = CreateWindowExW(WS_EX_TOOLWINDOW, windowClass.lpszClassName, L"", WS_POPUP,
+                                       0, 0, 0, 0, owner, nullptr, windowClass.hInstance, nullptr);
+    Check(atom && other, "creates an isolated second-session ownership probe");
+    Check(other && !TerminalWindow(console), "does not redirect a shared terminal window");
+    if (other)
+        DestroyWindow(other);
+    if (atom)
+        UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance);
+    Check(TerminalWindow(console) == owner, "resolves the original owner after the probe exits");
+    ShowWindowHook(console, SW_HIDE);
+    Check(WaitVisible(owner, false), "can hide the terminal again without closing its client");
+    DWORD members[8];
+    Check(GetConsoleProcessList(members, ARRAYSIZE(members)) != 0,
+          "console remains attached and usable while hidden");
+}
+
 void TestNativeConnection()
 {
     Check(IsInteractiveGuiProcess(), "runs as an interactive GUI application");
@@ -290,7 +355,12 @@ void TestNativeConnection()
     Check(g_rewritten == 1, "native ConDrv request reaches the kernel with ConsoleApp enabled");
     Check(g_allocationDepth == 0, "allocation scope is restored");
     if (allocated)
+    {
+        TestWindowVisibility();
         FreeConsole();
+        Wh_ModBeforeUninit();
+        Wh_ModUninit();
+    }
     if (g_allocateWithOptions)
     {
         struct Options
